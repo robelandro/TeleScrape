@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy
+alembic
+apscheduler
+spacy
+pandas
+scikit-learn
+telethon
+python-jose[cryptography]
+passlib
+bcrypt
+python-multipart
+mcp
+fastmcp
