@@ -23,6 +23,7 @@ from app.schemas import (
 import json
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError
 from app.auth import get_password_hash, verify_password, create_access_token, get_current_user, get_admin_user
 from app.scraper import run_scrape_cycle
 from app.mcp_server import mcp_app
@@ -110,7 +111,20 @@ def get_telegram_config(db: Session = Depends(get_db), current_user: User = Depe
         else:
             api_hash = api_hash_config.value
 
-    return {"is_configured": bool(api_id and api_hash)}
+    return {"is_configured": bool(api_id and api_hash), "api_id": api_id}
+
+@app.delete("/api/telegram/config")
+def delete_telegram_config(db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    db.query(Config).filter(Config.key.in_(["TG_API_ID", "TG_API_HASH"]), Config.user_id == current_user.id).delete(synchronize_session=False)
+    db.commit()
+
+    if "TG_API_ID" in os.environ:
+        del os.environ["TG_API_ID"]
+    if "TG_API_HASH" in os.environ:
+        del os.environ["TG_API_HASH"]
+    os.environ["SIMULATION_MODE"] = "true"
+
+    return {"message": "Telegram configuration removed"}
 
 @app.post("/api/telegram/auth/send_code")
 async def send_telegram_code(req: SendCodeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
@@ -166,7 +180,12 @@ async def login_telegram(req: LoginCodeRequest, db: Session = Depends(get_db), c
     await client.connect()
 
     try:
-        await client.sign_in(phone=req.phone_number, hash=req.phone_code_hash, code=req.code)
+        try:
+            await client.sign_in(phone=req.phone_number, phone_code_hash=req.phone_code_hash, code=req.code)
+        except SessionPasswordNeededError:
+            if not req.password:
+                raise HTTPException(status_code=401, detail="2FA Password required")
+            await client.sign_in(password=req.password)
 
         # Save authorized session
         auth_session_str = client.session.save()
