@@ -47,3 +47,13 @@ class AnalyticsCache(Base):
     total_posts_30d = Column(Integer, nullable=False)
     growth_slope = Column(Float, nullable=False)
     last_updated_at = Column(DateTime, server_default=func.now())
+
+class Config(Base):
+    __tablename__ = "config"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), nullable=False)
+    value = Column(Text, nullable=False)
+    encrypt_type = Column(String(20), nullable=False, default="raw")  # 'raw' or 'encrypted'
+    user_id = Column(Integer, ForeignKey("users.id"))
+
+    __table_args__ = (UniqueConstraint("key", "user_id"),)

@@ -12,14 +12,17 @@ from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.db import get_db, engine, SessionLocal
-from app.models import Base, User, TargetChannel, RawMessage, ExtractedJob, AnalyticsCache
+from app.models import Base, User, TargetChannel, RawMessage, ExtractedJob, AnalyticsCache, Config
+from app.crypto import encrypt_value, decrypt_value
 from app.schemas import (
     UserCreate, UserResponse, Token, LoginRequest,
     ChannelCreate, ChannelResponse, JobResponse,
     DashboardSummaryResponse, DashboardChartsResponse, ChartDataPoint,
-    TelegramConfig
+    TelegramConfig, SendCodeRequest, LoginCodeRequest
 )
 import json
+from telethon.sync import TelegramClient
+from telethon.sessions import StringSession
 from app.auth import get_password_hash, verify_password, create_access_token, get_current_user, get_admin_user
 from app.scraper import run_scrape_cycle
 from app.mcp_server import mcp_app
@@ -60,33 +63,162 @@ app.add_middleware(
 scheduler = BackgroundScheduler()
 
 # Telegram Config Endpoints
-TELEGRAM_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "telegram_config.json")
-
 @app.post("/api/telegram/config")
-def update_telegram_config(config: TelegramConfig, current_user: User = Depends(get_admin_user)):
-    with open(TELEGRAM_CONFIG_PATH, "w") as f:
-        json.dump({"api_id": config.api_id, "api_hash": config.api_hash}, f)
+def update_telegram_config(config: TelegramConfig, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    # Save TG_API_ID (raw)
+    api_id_config = db.query(Config).filter_by(key="TG_API_ID", user_id=current_user.id).first()
+    if not api_id_config:
+        api_id_config = Config(key="TG_API_ID", user_id=current_user.id)
+        db.add(api_id_config)
+    api_id_config.value = config.api_id
+    api_id_config.encrypt_type = "raw"
+
+    # Save TG_API_HASH (encrypted)
+    api_hash_config = db.query(Config).filter_by(key="TG_API_HASH", user_id=current_user.id).first()
+    if not api_hash_config:
+        api_hash_config = Config(key="TG_API_HASH", user_id=current_user.id)
+        db.add(api_hash_config)
+    api_hash_config.value = encrypt_value(config.api_hash)
+    api_hash_config.encrypt_type = "encrypted"
+
+    db.commit()
+
     # Also update the current env for immediate usage
     os.environ["TG_API_ID"] = config.api_id
     os.environ["TG_API_HASH"] = config.api_hash
-    # Disable simulation mode if valid credentials are provided
     if config.api_id and config.api_hash:
         os.environ["SIMULATION_MODE"] = "false"
-    return {"message": "Telegram configuration saved"}
+
+    return {"message": "Telegram configuration saved to database"}
 
 @app.get("/api/telegram/config")
-def get_telegram_config(current_user: User = Depends(get_admin_user)):
+def get_telegram_config(db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
     api_id = os.environ.get("TG_API_ID")
     api_hash = os.environ.get("TG_API_HASH")
-    if os.path.exists(TELEGRAM_CONFIG_PATH):
-        try:
-            with open(TELEGRAM_CONFIG_PATH, "r") as f:
-                config = json.load(f)
-                api_id = config.get("api_id", api_id)
-                api_hash = config.get("api_hash", api_hash)
-        except Exception:
-            pass
+
+    api_id_config = db.query(Config).filter_by(key="TG_API_ID", user_id=current_user.id).first()
+    api_hash_config = db.query(Config).filter_by(key="TG_API_HASH", user_id=current_user.id).first()
+
+    if api_id_config:
+        api_id = api_id_config.value
+    if api_hash_config:
+        if api_hash_config.encrypt_type == "encrypted":
+            try:
+                api_hash = decrypt_value(api_hash_config.value)
+            except Exception:
+                api_hash = None
+        else:
+            api_hash = api_hash_config.value
+
     return {"is_configured": bool(api_id and api_hash)}
+
+@app.post("/api/telegram/auth/send_code")
+async def send_telegram_code(req: SendCodeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    # Retrieve api_id and api_hash from DB
+    api_id_config = db.query(Config).filter_by(key="TG_API_ID", user_id=current_user.id).first()
+    api_hash_config = db.query(Config).filter_by(key="TG_API_HASH", user_id=current_user.id).first()
+
+    if not api_id_config or not api_hash_config:
+        raise HTTPException(status_code=400, detail="Telegram API ID and Hash must be configured first.")
+
+    api_id = int(api_id_config.value)
+    api_hash = decrypt_value(api_hash_config.value) if api_hash_config.encrypt_type == "encrypted" else api_hash_config.value
+
+    # Create client with new StringSession
+    client = TelegramClient(StringSession(), api_id, api_hash)
+    await client.connect()
+
+    try:
+        sent_code = await client.send_code_request(req.phone_number)
+
+        # Temporarily store the session string and phone_code_hash
+        session_str = client.session.save()
+
+        pending_session = db.query(Config).filter_by(key="TG_PENDING_SESSION", user_id=current_user.id).first()
+        if not pending_session:
+            pending_session = Config(key="TG_PENDING_SESSION", user_id=current_user.id)
+            db.add(pending_session)
+        pending_session.value = encrypt_value(session_str)
+        pending_session.encrypt_type = "encrypted"
+
+        db.commit()
+
+        return {"phone_code_hash": sent_code.phone_code_hash}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        await client.disconnect()
+
+@app.post("/api/telegram/auth/login")
+async def login_telegram(req: LoginCodeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    api_id_config = db.query(Config).filter_by(key="TG_API_ID", user_id=current_user.id).first()
+    api_hash_config = db.query(Config).filter_by(key="TG_API_HASH", user_id=current_user.id).first()
+    pending_session_config = db.query(Config).filter_by(key="TG_PENDING_SESSION", user_id=current_user.id).first()
+
+    if not api_id_config or not api_hash_config or not pending_session_config:
+        raise HTTPException(status_code=400, detail="Missing configuration or pending session.")
+
+    api_id = int(api_id_config.value)
+    api_hash = decrypt_value(api_hash_config.value) if api_hash_config.encrypt_type == "encrypted" else api_hash_config.value
+    session_str = decrypt_value(pending_session_config.value) if pending_session_config.encrypt_type == "encrypted" else pending_session_config.value
+
+    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+    await client.connect()
+
+    try:
+        await client.sign_in(phone=req.phone_number, hash=req.phone_code_hash, code=req.code)
+
+        # Save authorized session
+        auth_session_str = client.session.save()
+        auth_session = db.query(Config).filter_by(key="TG_SESSION", user_id=current_user.id).first()
+        if not auth_session:
+            auth_session = Config(key="TG_SESSION", user_id=current_user.id)
+            db.add(auth_session)
+        auth_session.value = encrypt_value(auth_session_str)
+        auth_session.encrypt_type = "encrypted"
+
+        # Cleanup pending
+        db.delete(pending_session_config)
+        db.commit()
+
+        return {"message": "Logged in successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        await client.disconnect()
+
+@app.post("/api/telegram/auth/logout")
+async def logout_telegram(db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    api_id_config = db.query(Config).filter_by(key="TG_API_ID", user_id=current_user.id).first()
+    api_hash_config = db.query(Config).filter_by(key="TG_API_HASH", user_id=current_user.id).first()
+    auth_session_config = db.query(Config).filter_by(key="TG_SESSION", user_id=current_user.id).first()
+
+    if not auth_session_config:
+        return {"message": "Not logged in"}
+
+    api_id = int(api_id_config.value)
+    api_hash = decrypt_value(api_hash_config.value) if api_hash_config.encrypt_type == "encrypted" else api_hash_config.value
+    session_str = decrypt_value(auth_session_config.value) if auth_session_config.encrypt_type == "encrypted" else auth_session_config.value
+
+    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+    await client.connect()
+    try:
+        await client.log_out()
+    except Exception:
+        pass # Ignore errors if already logged out remotely
+    finally:
+        await client.disconnect()
+
+    # Delete from DB
+    db.delete(auth_session_config)
+    db.commit()
+
+    return {"message": "Logged out successfully"}
+
+@app.get("/api/telegram/auth/status")
+def get_telegram_auth_status(db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    auth_session_config = db.query(Config).filter_by(key="TG_SESSION", user_id=current_user.id).first()
+    return {"is_logged_in": bool(auth_session_config)}
 
 def trigger_scrape():
     db = SessionLocal()
