@@ -46,7 +46,7 @@ The entire system is designed to run locally, on-device—no cloud APIs or cloud
                                                       |
                                                       v
                                         +-------------+------------+
-                                        | SQLite (SQLAlchemy+Alembic)|
+                                        | Postgres (SQLAlchemy)    |
                                         +----------------------------+
 ```
 
@@ -124,11 +124,13 @@ If you prefer to run the API, scraper, and React frontend directly on your local
 
 You can customize the system behavior in `docker-compose.yml` or your local terminal environment:
 
-*   `DATABASE_URL`: SQLAlchemy connection string (Defaults to `sqlite:///./backend/data.db`).
+*   `DATABASE_URL`: SQLAlchemy connection string (Defaults to PostgreSQL in docker setup).
 *   `JWT_SECRET`: Secret key used to sign JSON Web Tokens.
 *   `SIMULATION_MODE`: Set to `true` (default) to run the high-fidelity mock scraper. Set to `false` to attempt real scrapes.
-*   `TG_API_ID`: Your Telegram API ID (required for real scraping).
-*   `TG_API_HASH`: Your Telegram API Hash (required for real scraping).
+*   `TG_API_ID`: Your Telegram API ID (required for real scraping). Can also be configured via Settings UI.
+*   `TG_API_HASH`: Your Telegram API Hash (required for real scraping). Can also be configured via Settings UI.
+*   `ADMIN_USERNAME`: Admin account username for database initialization (Default: `admin`).
+*   `ADMIN_PASSWORD`: Admin account password for database initialization (Default: `admin123`).
 
 ---
 

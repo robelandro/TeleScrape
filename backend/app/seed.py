@@ -10,13 +10,18 @@ logger = logging.getLogger(__name__)
 def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
+import os
+
 def seed_db(db: Session):
+    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+
     # Create admin user
-    admin_user = db.query(User).filter_by(username="admin").first()
+    admin_user = db.query(User).filter_by(username=admin_username).first()
     if not admin_user:
         admin_user = User(
-            username="admin",
-            password_hash=get_password_hash("admin123"),
+            username=admin_username,
+            password_hash=get_password_hash(admin_password),
             role="admin"
         )
         db.add(admin_user)

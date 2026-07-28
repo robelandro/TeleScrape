@@ -69,3 +69,7 @@ class CategorySeriesPoint(BaseModel):
 class DashboardChartsResponse(BaseModel):
     volume_by_day: List[ChartDataPoint]
     category_trends: List[dict]  # Recharts friendly list of dicts with date and category counts
+
+class TelegramConfig(BaseModel):
+    api_id: str
+    api_hash: str
