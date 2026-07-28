@@ -96,12 +96,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             </button>
           </div>
         </form>
-
-        <div className="mt-6 text-xs text-gray-500 text-center space-y-1">
-          <p>Demo accounts:</p>
-          <p>Admin: <span className="font-semibold">admin</span> / <span className="font-semibold">admin123</span></p>
-          <p>Viewer: <span className="font-semibold">viewer</span> / <span className="font-semibold">viewer123</span></p>
-        </div>
       </div>
     </div>
   );
