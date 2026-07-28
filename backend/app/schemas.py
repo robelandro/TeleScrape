@@ -73,3 +73,11 @@ class DashboardChartsResponse(BaseModel):
 class TelegramConfig(BaseModel):
     api_id: str
     api_hash: str
+
+class SendCodeRequest(BaseModel):
+    phone_number: str
+
+class LoginCodeRequest(BaseModel):
+    phone_number: str
+    phone_code_hash: str
+    code: str

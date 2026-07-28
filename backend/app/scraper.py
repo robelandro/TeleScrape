@@ -13,22 +13,29 @@ from app.forecasting import recompute_all_trend_slopes
 
 logger = logging.getLogger(__name__)
 
-import json
+from telethon.sessions import StringSession
+from app.models import Config
+from app.crypto import decrypt_value
 
-def get_telegram_credentials():
-    api_id = os.getenv("TG_API_ID")
-    api_hash = os.getenv("TG_API_HASH")
-    config_path = os.path.join(os.path.dirname(__file__), "..", "telegram_config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                config = json.load(f)
-                if config.get("api_id") and config.get("api_hash"):
-                    api_id = config.get("api_id")
-                    api_hash = config.get("api_hash")
-        except Exception:
-            pass
-    return api_id, api_hash
+def get_telegram_credentials(session):
+    # Fetch admin user implicitly for now, as jobs run in background
+    # Usually there is only one admin running the system, or we can fetch the first valid cred
+    api_id_config = session.query(Config).filter_by(key="TG_API_ID").first()
+    api_hash_config = session.query(Config).filter_by(key="TG_API_HASH").first()
+    session_config = session.query(Config).filter_by(key="TG_SESSION").first()
+
+    api_id = api_id_config.value if api_id_config else os.getenv("TG_API_ID")
+    api_hash = None
+    if api_hash_config:
+        api_hash = decrypt_value(api_hash_config.value) if api_hash_config.encrypt_type == "encrypted" else api_hash_config.value
+    else:
+        api_hash = os.getenv("TG_API_HASH")
+
+    session_str = None
+    if session_config:
+        session_str = decrypt_value(session_config.value) if session_config.encrypt_type == "encrypted" else session_config.value
+
+    return api_id, api_hash, session_str
 
 # Mock postings templates
 MOCK_JOBS_TEMPLATES = [
@@ -131,14 +138,17 @@ async def run_simulated_scrape(channel, session):
 async def run_real_scrape(channel, session):
     logger.info(f"Running real Telethon scrape for channel: {channel.channel_name}")
 
-    api_id, api_hash = get_telegram_credentials()
+    api_id, api_hash, session_str = get_telegram_credentials(session)
     if not api_id or not api_hash:
         logger.error("Missing TG_API_ID or TG_API_HASH. Cannot run real scrape.")
         return
 
+    if not session_str:
+        logger.error("Missing Telegram session. User needs to login via Settings.")
+        return
+
     try:
-        # User session file saved inside a local data folder
-        client = TelegramClient("telescrape_session", api_id=int(api_id), api_hash=api_hash)
+        client = TelegramClient(StringSession(session_str), api_id=int(api_id), api_hash=api_hash)
         await client.connect()
         if not await client.is_user_authorized():
             logger.error("Telethon user not authorized. Falling back or skipping.")
@@ -195,8 +205,8 @@ async def run_scrape_cycle(db_session):
     logger.info("Starting scraper cycle...")
     active_channels = db_session.query(TargetChannel).filter_by(is_active=True).all()
 
-    api_id, api_hash = get_telegram_credentials()
-    simulation_mode = os.getenv("SIMULATION_MODE", "true").lower() == "true" or not api_id or not api_hash
+    api_id, api_hash, session_str = get_telegram_credentials(db_session)
+    simulation_mode = os.getenv("SIMULATION_MODE", "true").lower() == "true" or not api_id or not api_hash or not session_str
 
     for ch in active_channels:
         if simulation_mode:
