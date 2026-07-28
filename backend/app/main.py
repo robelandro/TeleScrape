@@ -16,8 +16,10 @@ from app.models import Base, User, TargetChannel, RawMessage, ExtractedJob, Anal
 from app.schemas import (
     UserCreate, UserResponse, Token, LoginRequest,
     ChannelCreate, ChannelResponse, JobResponse,
-    DashboardSummaryResponse, DashboardChartsResponse, ChartDataPoint
+    DashboardSummaryResponse, DashboardChartsResponse, ChartDataPoint,
+    TelegramConfig
 )
+import json
 from app.auth import get_password_hash, verify_password, create_access_token, get_current_user, get_admin_user
 from app.scraper import run_scrape_cycle
 from app.mcp_server import mcp_app
@@ -56,6 +58,35 @@ app.add_middleware(
 
 # Background scheduler
 scheduler = BackgroundScheduler()
+
+# Telegram Config Endpoints
+TELEGRAM_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "telegram_config.json")
+
+@app.post("/api/telegram/config")
+def update_telegram_config(config: TelegramConfig, current_user: User = Depends(get_admin_user)):
+    with open(TELEGRAM_CONFIG_PATH, "w") as f:
+        json.dump({"api_id": config.api_id, "api_hash": config.api_hash}, f)
+    # Also update the current env for immediate usage
+    os.environ["TG_API_ID"] = config.api_id
+    os.environ["TG_API_HASH"] = config.api_hash
+    # Disable simulation mode if valid credentials are provided
+    if config.api_id and config.api_hash:
+        os.environ["SIMULATION_MODE"] = "false"
+    return {"message": "Telegram configuration saved"}
+
+@app.get("/api/telegram/config")
+def get_telegram_config(current_user: User = Depends(get_admin_user)):
+    api_id = os.environ.get("TG_API_ID")
+    api_hash = os.environ.get("TG_API_HASH")
+    if os.path.exists(TELEGRAM_CONFIG_PATH):
+        try:
+            with open(TELEGRAM_CONFIG_PATH, "r") as f:
+                config = json.load(f)
+                api_id = config.get("api_id", api_id)
+                api_hash = config.get("api_hash", api_hash)
+        except Exception:
+            pass
+    return {"is_configured": bool(api_id and api_hash)}
 
 def trigger_scrape():
     db = SessionLocal()
