@@ -81,3 +81,4 @@ class LoginCodeRequest(BaseModel):
     phone_number: str
     phone_code_hash: str
     code: str
+    password: Optional[str] = None

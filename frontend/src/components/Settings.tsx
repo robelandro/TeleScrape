@@ -15,11 +15,16 @@ export default function Settings() {
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
   const [otpCode, setOtpCode] = useState("");
   const [waitingForOtp, setWaitingForOtp] = useState(false);
+  const [requires2fa, setRequires2fa] = useState(false);
+  const [password2fa, setPassword2fa] = useState("");
 
   const fetchStatus = () => {
     apiFetch("/telegram/config")
       .then((data) => {
         setIsConfigured(data.is_configured);
+        if (data.is_configured && data.api_id) {
+          setApiId(data.api_id);
+        }
       })
       .catch(console.error);
 
@@ -84,13 +89,25 @@ export default function Settings() {
     try {
       await apiFetch("/telegram/auth/login", {
         method: "POST",
-        body: JSON.stringify({ phone_number: phoneNumber, phone_code_hash: phoneCodeHash, code: otpCode }),
+        body: JSON.stringify({
+          phone_number: phoneNumber,
+          phone_code_hash: phoneCodeHash,
+          code: otpCode,
+          password: password2fa || undefined
+        }),
       });
       setStatusMessage({ type: "success", text: "Logged in to Telegram successfully." });
       setWaitingForOtp(false);
+      setRequires2fa(false);
+      setPassword2fa("");
       fetchStatus();
     } catch (err: any) {
-      setStatusMessage({ type: "error", text: err.message || "Failed to login." });
+      if (err.message && err.message.includes("2FA Password required")) {
+        setRequires2fa(true);
+        setStatusMessage({ type: "error", text: "Two-Factor Authentication is enabled. Please enter your password." });
+      } else {
+        setStatusMessage({ type: "error", text: err.message || "Failed to login." });
+      }
     } finally {
       setLoading(false);
     }
@@ -105,6 +122,23 @@ export default function Settings() {
       fetchStatus();
     } catch (err: any) {
       setStatusMessage({ type: "error", text: err.message || "Failed to log out." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveConfig = async () => {
+    if (!window.confirm("Are you sure you want to remove the Telegram configuration?")) return;
+    setLoading(true);
+    setStatusMessage(null);
+    try {
+      await apiFetch("/telegram/config", { method: "DELETE" });
+      setStatusMessage({ type: "success", text: "Telegram configuration removed." });
+      setApiId("");
+      setApiHash("");
+      fetchStatus();
+    } catch (err: any) {
+      setStatusMessage({ type: "error", text: err.message || "Failed to remove configuration." });
     } finally {
       setLoading(false);
     }
@@ -126,12 +160,21 @@ export default function Settings() {
         {isConfigured ? (
           <div className="mb-6 bg-green-50 border border-green-200 text-green-800 p-4 rounded-lg flex items-start space-x-3">
             <CheckCircle className="w-5 h-5 flex-shrink-0 text-green-600 mt-0.5" />
-            <div>
-              <p className="font-semibold">Telegram Client is Configured</p>
+            <div className="flex-1">
+              <p className="font-semibold">Telegram Client is Configured (API ID: {apiId})</p>
               <p className="text-sm mt-1">
                 The scraper is set up to run against real Telegram channels. You can override the existing configuration by submitting the form below.
               </p>
             </div>
+            {!isLoggedIn && (
+              <button
+                onClick={handleRemoveConfig}
+                disabled={loading}
+                className="text-xs bg-white text-red-600 border border-red-200 hover:bg-red-50 px-3 py-1.5 rounded font-semibold transition"
+              >
+                Remove Config
+              </button>
+            )}
           </div>
         ) : (
           <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-lg flex items-start space-x-3">
@@ -243,13 +286,26 @@ export default function Settings() {
                         placeholder="Enter the code sent to your Telegram app"
                       />
                     </div>
+                    {requires2fa && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">2FA Password</label>
+                        <input
+                          type="password"
+                          required
+                          value={password2fa}
+                          onChange={(e) => setPassword2fa(e.target.value)}
+                          className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                          placeholder="Your Telegram 2FA Password"
+                        />
+                      </div>
+                    )}
                     <button
                       type="submit"
                       disabled={loading}
                       className="flex items-center justify-center space-x-2 py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 disabled:bg-emerald-400 cursor-pointer"
                     >
                       <CheckCircle className="w-4 h-4" />
-                      <span>{loading ? "Logging in..." : "Submit Code & Login"}</span>
+                      <span>{loading ? "Logging in..." : requires2fa ? "Submit Password & Login" : "Submit Code & Login"}</span>
                     </button>
                   </form>
                 )}
