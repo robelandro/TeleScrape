@@ -25,7 +25,7 @@ from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from app.auth import get_password_hash, verify_password, create_access_token, get_current_user, get_admin_user
-from app.scraper import run_scrape_cycle
+from app.scraper import run_scrape_cycle, start_listener, stop_listener, restart_listener_sync
 from app.mcp_server import mcp_app
 
 logging.basicConfig(level=logging.INFO)
@@ -35,17 +35,24 @@ logger = logging.getLogger(__name__)
 async def lifespan(app_instance: FastAPI):
     # Startup:
     logger.info("Starting background scheduler...")
-    scheduler.add_job(trigger_scrape, "interval", minutes=30, id="scrape_job")
+    interval_minutes = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30"))
+    scheduler.add_job(trigger_scrape, "interval", minutes=interval_minutes, id="scrape_job")
     scheduler.start()
 
     import threading
     threading.Thread(target=trigger_scrape, daemon=True).start()
+
+    # Start real-time listener
+    asyncio.create_task(start_listener())
 
     # Delegate to mcp_app lifespan for session manager initialization
     async with mcp_app.lifespan(app_instance):
         yield
 
     # Shutdown:
+    logger.info("Shutting down real-time listener...")
+    await stop_listener()
+
     logger.info("Shutting down background scheduler...")
     scheduler.shutdown()
 
@@ -124,6 +131,8 @@ def delete_telegram_config(db: Session = Depends(get_db), current_user: User = D
         del os.environ["TG_API_HASH"]
     os.environ["SIMULATION_MODE"] = "true"
 
+    restart_listener_sync()
+
     return {"message": "Telegram configuration removed"}
 
 @app.post("/api/telegram/auth/send_code")
@@ -200,6 +209,8 @@ async def login_telegram(req: LoginCodeRequest, db: Session = Depends(get_db), c
         db.delete(pending_session_config)
         db.commit()
 
+        restart_listener_sync()
+
         return {"message": "Logged in successfully"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -231,6 +242,8 @@ async def logout_telegram(db: Session = Depends(get_db), current_user: User = De
     # Delete from DB
     db.delete(auth_session_config)
     db.commit()
+
+    restart_listener_sync()
 
     return {"message": "Logged out successfully"}
 
@@ -300,6 +313,8 @@ def add_channel(channel_in: ChannelCreate, db: Session = Depends(get_db), curren
     db.add(channel)
     db.commit()
     db.refresh(channel)
+
+    restart_listener_sync()
     return channel
 
 @app.delete("/api/channels/{channel_id}")
@@ -317,6 +332,8 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), current_user:
 
     db.delete(channel)
     db.commit()
+
+    restart_listener_sync()
     return {"success": True, "message": "Channel and associated data deleted"}
 
 # --- JOBS ENDPOINTS ---

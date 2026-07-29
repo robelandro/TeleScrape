@@ -4,9 +4,10 @@ import random
 import datetime
 import logging
 from sqlalchemy import func
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 
+from app.db import SessionLocal
 from app.models import TargetChannel, RawMessage, ExtractedJob
 from app.nlp import extract_job_fields
 from app.forecasting import recompute_all_trend_slopes
@@ -217,3 +218,129 @@ async def run_scrape_cycle(db_session):
     logger.info("Scraper cycle finished. Recomputing trend slopes...")
     recompute_all_trend_slopes(db_session)
     logger.info("Trend slopes recomputed successfully.")
+
+# Real-time listener
+_listener_client = None
+
+async def start_listener(db_session=None):
+    global _listener_client
+    if _listener_client:
+        await stop_listener()
+
+    close_db = False
+    if db_session is None:
+        db_session = SessionLocal()
+        close_db = True
+
+    try:
+        api_id, api_hash, session_str = get_telegram_credentials(db_session)
+        simulation_mode = os.getenv("SIMULATION_MODE", "true").lower() == "true" or not api_id or not api_hash or not session_str
+
+        if simulation_mode:
+            logger.info("Simulation mode active. Real-time listener not started.")
+            return
+
+        active_channels = db_session.query(TargetChannel).filter_by(is_active=True).all()
+        channel_names = [ch.channel_name for ch in active_channels]
+
+        if not channel_names:
+            logger.info("No active channels to monitor. Real-time listener not started.")
+            return
+
+        _listener_client = TelegramClient(StringSession(session_str), api_id=int(api_id), api_hash=api_hash)
+        await _listener_client.connect()
+        if not await _listener_client.is_user_authorized():
+            logger.error("Telethon user not authorized. Real-time listener cannot start.")
+            await _listener_client.disconnect()
+            _listener_client = None
+            return
+
+        @_listener_client.on(events.NewMessage(chats=channel_names))
+        async def handler(event):
+            logger.info(f"New real-time message received in {event.chat.username or event.chat.title}")
+            if not event.message.text:
+                return
+
+            db = SessionLocal()
+            try:
+                # Find channel ID
+                chat_identifier = ""
+                if event.chat.username:
+                    chat_identifier = f"@{event.chat.username}"
+                elif event.chat.title:
+                    chat_identifier = event.chat.title
+
+                channel = None
+                if chat_identifier:
+                    channel = db.query(TargetChannel).filter(TargetChannel.channel_name.ilike(f"%{chat_identifier}%")).first()
+
+                if not channel:
+                    # Fallback check
+                    for ch in active_channels:
+                        if ch.channel_name.lower().replace("@", "") == str(event.chat.username).lower():
+                            channel = ch
+                            break
+
+                if not channel:
+                    logger.warning(f"Could not map incoming message to a known active channel: {chat_identifier}")
+                    return
+
+                existing = db.query(RawMessage).filter_by(
+                    channel_id=channel.id,
+                    telegram_message_id=event.message.id
+                ).first()
+
+                if not existing:
+                    raw = RawMessage(
+                        channel_id=channel.id,
+                        telegram_message_id=event.message.id,
+                        message_text=event.message.text,
+                        posted_at=event.message.date
+                    )
+                    db.add(raw)
+                    db.flush()
+
+                    fields = extract_job_fields(event.message.text)
+                    db.add(ExtractedJob(
+                        raw_message_id=raw.id,
+                        job_title=fields["job_title"],
+                        company=fields["company"],
+                        salary_range=fields["salary_range"],
+                        skills_required=fields["skills_required"],
+                        post_date=event.message.date.date()
+                    ))
+
+                    channel.last_scraped_message_id = max(channel.last_scraped_message_id or 0, event.message.id)
+                    channel.last_scraped_at = func.now()
+                    db.commit()
+
+                    # Optional: Recompute trends in background or lightly here
+                    # recompute_all_trend_slopes(db)
+            except Exception as e:
+                logger.exception(f"Error processing real-time message: {e}")
+            finally:
+                db.close()
+
+        logger.info(f"Real-time listener started for {len(channel_names)} channels.")
+
+    except Exception as e:
+        logger.exception(f"Failed to start real-time listener: {e}")
+    finally:
+        if close_db:
+            db_session.close()
+
+async def stop_listener():
+    global _listener_client
+    if _listener_client:
+        logger.info("Stopping real-time listener...")
+        await _listener_client.disconnect()
+        _listener_client = None
+        logger.info("Real-time listener stopped.")
+
+def restart_listener_sync():
+    """Synchronous helper to restart listener in background."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(start_listener())
+    except RuntimeError:
+        pass # No loop running
