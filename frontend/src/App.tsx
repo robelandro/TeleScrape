@@ -5,7 +5,7 @@ import Dashboard from "./components/Dashboard";
 import Jobs from "./components/Jobs";
 import Channels from "./components/Channels";
 import Settings from "./components/Settings";
-import { LogOut, BarChart3, Briefcase, Radio, User as UserIcon, Settings as SettingsIcon, Menu, X } from "lucide-react";
+import { LogOut, BarChart3, Briefcase, Radio, User as UserIcon, Settings as SettingsIcon, Menu, X, FileText } from "lucide-react";
 
 const queryClient = new QueryClient();
 
@@ -107,6 +107,17 @@ export default function App() {
               <SettingsIcon className="w-5 h-5 flex-shrink-0" />
               {isSidebarOpen && <span>Settings</span>}
             </button>
+
+            <a
+              href="http://localhost:8000/docs"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full flex items-center space-x-3 px-3 py-3 rounded-lg text-sm font-semibold text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition duration-150 cursor-pointer"
+              title={!isSidebarOpen ? "API Docs" : undefined}
+            >
+              <FileText className="w-5 h-5 flex-shrink-0" />
+              {isSidebarOpen && <span>API Docs</span>}
+            </a>
           </nav>
 
           <div className="p-4 border-t border-gray-100 space-y-4">

@@ -9,7 +9,7 @@ from telethon.errors import FloodWaitError
 
 from app.db import SessionLocal
 from app.models import TargetChannel, RawMessage, ExtractedJob
-from app.nlp import extract_job_fields
+from app.nlp import extract_job_fields_llm
 from app.forecasting import recompute_all_trend_slopes
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ MOCK_JOBS_TEMPLATES = [
     }
 ]
 
-async def run_simulated_scrape(channel, session):
+async def run_simulated_scrape(channel, session, start_date=None, end_date=None):
     logger.info(f"Running simulated scrape for channel: {channel.channel_name}")
     start_id = channel.last_scraped_message_id or 0
 
@@ -86,10 +86,18 @@ async def run_simulated_scrape(channel, session):
     num_messages = random.randint(15, 25)
 
     for i in range(1, num_messages + 1):
+        # Allow cancellation check
+        await asyncio.sleep(0.01)
+
         msg_id = start_id + i
         # Spread messages over the last 28 days
         days_ago = random.randint(0, 28)
         posted_at = datetime.datetime.now() - datetime.timedelta(days=days_ago, hours=random.randint(0, 23))
+
+        if start_date and posted_at.date() < start_date:
+            continue
+        if end_date and posted_at.date() > end_date:
+            continue
 
         # Pick random template
         tmpl = random.choice(MOCK_JOBS_TEMPLATES)
@@ -119,7 +127,7 @@ async def run_simulated_scrape(channel, session):
             session.add(raw)
             session.flush() # get raw.id
 
-            fields = extract_job_fields(message_text)
+            fields = extract_job_fields_llm(message_text)
 
             session.add(ExtractedJob(
                 raw_message_id=raw.id,
@@ -136,7 +144,7 @@ async def run_simulated_scrape(channel, session):
     session.commit()
     logger.info(f"Simulated scrape finished. Scraped {num_messages} messages for {channel.channel_name}.")
 
-async def run_real_scrape(channel, session):
+async def run_real_scrape(channel, session, start_date=None, end_date=None):
     logger.info(f"Running real Telethon scrape for channel: {channel.channel_name}")
 
     api_id, api_hash, session_str = get_telegram_credentials(session)
@@ -156,11 +164,22 @@ async def run_real_scrape(channel, session):
             await client.disconnect()
             return
 
-        async for message in client.iter_messages(
-            channel.channel_name,
-            min_id=channel.last_scraped_message_id or 0,
-            limit=None
-        ):
+
+        # Determine iterator args
+        iter_kwargs = {"limit": None}
+        if start_date and end_date:
+            # When scraping a date range, we might fetch older messages
+            iter_kwargs["offset_date"] = end_date + datetime.timedelta(days=1)
+        else:
+            iter_kwargs["min_id"] = channel.last_scraped_message_id or 0
+
+        async for message in client.iter_messages(channel.channel_name, **iter_kwargs):
+            if start_date and message.date.date() < start_date:
+                # Since messages are retrieved in reverse chronological order, if we pass the start date, we can break
+                break
+            if end_date and message.date.date() > end_date:
+                continue
+
             if not message.text:
                 continue
 
@@ -179,7 +198,7 @@ async def run_real_scrape(channel, session):
                 session.add(raw)
                 session.flush()
 
-                fields = extract_job_fields(message.text)
+                fields = extract_job_fields_llm(message.text)
                 session.add(ExtractedJob(
                     raw_message_id=raw.id,
                     job_title=fields["job_title"],
@@ -218,6 +237,47 @@ async def run_scrape_cycle(db_session):
     logger.info("Scraper cycle finished. Recomputing trend slopes...")
     recompute_all_trend_slopes(db_session)
     logger.info("Trend slopes recomputed successfully.")
+
+# --- On-Demand Scraping Tasks Management ---
+active_scrapes = {}
+
+async def _channel_scrape_task_wrapper(channel_id, db_session, start_date, end_date):
+    try:
+        channel = db_session.query(TargetChannel).filter_by(id=channel_id).first()
+        if not channel:
+            return
+
+        api_id, api_hash, session_str = get_telegram_credentials(db_session)
+        simulation_mode = os.getenv("SIMULATION_MODE", "true").lower() == "true" or not api_id or not api_hash or not session_str
+
+        if simulation_mode:
+            await run_simulated_scrape(channel, db_session, start_date, end_date)
+        else:
+            await run_real_scrape(channel, db_session, start_date, end_date)
+
+        recompute_all_trend_slopes(db_session)
+    except asyncio.CancelledError:
+        logger.info(f"Scrape task for channel {channel_id} was cancelled.")
+    except Exception as e:
+        logger.exception(f"Error during on-demand scrape for channel {channel_id}: {e}")
+    finally:
+        active_scrapes.pop(channel_id, None)
+        db_session.close()
+
+def start_channel_scrape_task(channel_id, start_date, end_date):
+    if channel_id in active_scrapes:
+        raise ValueError("A scrape task is already running for this channel.")
+
+    db_session = SessionLocal()
+    task = asyncio.create_task(_channel_scrape_task_wrapper(channel_id, db_session, start_date, end_date))
+    active_scrapes[channel_id] = task
+
+def cancel_channel_scrape_task(channel_id):
+    if channel_id in active_scrapes:
+        task = active_scrapes[channel_id]
+        task.cancel()
+        return True
+    return False
 
 # Real-time listener
 _listener_client = None
@@ -300,7 +360,7 @@ async def start_listener(db_session=None):
                     db.add(raw)
                     db.flush()
 
-                    fields = extract_job_fields(event.message.text)
+                    fields = extract_job_fields_llm(event.message.text)
                     db.add(ExtractedJob(
                         raw_message_id=raw.id,
                         job_title=fields["job_title"],
