@@ -122,7 +122,7 @@ def get_telegram_config(db: Session = Depends(get_db), current_user: User = Depe
 
 @app.delete("/api/telegram/config")
 def delete_telegram_config(db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
-    db.query(Config).filter(Config.key.in_(["TG_API_ID", "TG_API_HASH"]), Config.user_id == current_user.id).delete(synchronize_session=False)
+    db.query(Config).filter(Config.key.in_(["TG_API_ID", "TG_API_HASH", "TG_SESSION"]), Config.user_id == current_user.id).delete(synchronize_session=False)
     db.commit()
 
     if "TG_API_ID" in os.environ:
@@ -337,7 +337,7 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), current_user:
     return {"success": True, "message": "Channel and associated data deleted"}
 
 @app.post("/api/channels/{channel_id}/scrape")
-def trigger_channel_scrape(channel_id: int, scrape_req: ScrapeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+async def trigger_channel_scrape(channel_id: int, scrape_req: ScrapeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
     channel = db.query(TargetChannel).filter_by(id=channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -349,7 +349,7 @@ def trigger_channel_scrape(channel_id: int, scrape_req: ScrapeRequest, db: Sessi
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/channels/{channel_id}/cancel_scrape")
-def cancel_channel_scrape(channel_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+async def cancel_channel_scrape(channel_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
     if cancel_channel_scrape_task(channel_id):
         return {"success": True, "message": "Scrape task cancelled."}
     else:

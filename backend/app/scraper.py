@@ -397,10 +397,15 @@ async def stop_listener():
         _listener_client = None
         logger.info("Real-time listener stopped.")
 
+import threading
+
 def restart_listener_sync():
     """Synchronous helper to restart listener in background."""
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(start_listener())
     except RuntimeError:
-        pass # No loop running
+        # If no loop is running in this thread, try to create a new one in a daemon thread
+        def start_in_new_loop():
+            asyncio.run(start_listener())
+        threading.Thread(target=start_in_new_loop, daemon=True).start()

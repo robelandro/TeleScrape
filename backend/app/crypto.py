@@ -4,16 +4,21 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+_fernet_instance = None
+
 def _get_fernet() -> Fernet:
-    secret = os.getenv("JWT_SECRET", "telescrape_super_secret_key_123")
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=b"telescrape_salt",
-        iterations=480000,
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(secret.encode()))
-    return Fernet(key)
+    global _fernet_instance
+    if _fernet_instance is None:
+        secret = os.getenv("JWT_SECRET", "telescrape_super_secret_key_123")
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b"telescrape_salt",
+            iterations=480000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(secret.encode()))
+        _fernet_instance = Fernet(key)
+    return _fernet_instance
 
 def encrypt_value(value: str) -> str:
     f = _get_fernet()
