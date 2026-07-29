@@ -82,3 +82,7 @@ class LoginCodeRequest(BaseModel):
     phone_code_hash: str
     code: str
     password: Optional[str] = None
+
+class ScrapeRequest(BaseModel):
+    start_date: date
+    end_date: date

@@ -1,7 +1,12 @@
+import os
 import re
 import json
 import spacy
+import logging
 from spacy.pipeline import EntityRuler
+import openai
+
+logger = logging.getLogger(__name__)
 
 nlp = spacy.load("en_core_web_sm")
 
@@ -108,3 +113,44 @@ def extract_job_fields(text: str) -> dict:
         "salary_range": salary_range,
         "company": company
     }
+
+def extract_job_fields_llm(text: str) -> dict:
+    """Attempt to extract fields using OpenAI LLM first, and gracefully fallback."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            prompt = f"""
+            You are a highly capable data extraction bot.
+            Extract the following fields from the job posting below.
+            Return the output strictly as a JSON object with the exact keys:
+            - "job_title": string
+            - "company": string (use "Unknown" if not found)
+            - "salary_range": string (or null if not found)
+            - "skills_required": list of strings (e.g. ["Python", "Docker"])
+
+            Job Posting:
+            \"\"\"
+            {text}
+            \"\"\"
+            """
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
+            if content:
+                data = json.loads(content)
+                return {
+                    "job_title": data.get("job_title", "General Staff"),
+                    "company": data.get("company", "Unknown"),
+                    "salary_range": data.get("salary_range"),
+                    "skills_required": json.dumps(data.get("skills_required", []))
+                }
+        except Exception as e:
+            logger.error(f"OpenAI extraction failed, falling back to spaCy: {e}")
+
+    # Fallback to existing logic
+    return extract_job_fields(text)

@@ -18,14 +18,14 @@ from app.schemas import (
     UserCreate, UserResponse, Token, LoginRequest,
     ChannelCreate, ChannelResponse, JobResponse,
     DashboardSummaryResponse, DashboardChartsResponse, ChartDataPoint,
-    TelegramConfig, SendCodeRequest, LoginCodeRequest
+    TelegramConfig, SendCodeRequest, LoginCodeRequest, ScrapeRequest
 )
 import json
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from app.auth import get_password_hash, verify_password, create_access_token, get_current_user, get_admin_user
-from app.scraper import run_scrape_cycle, start_listener, stop_listener, restart_listener_sync
+from app.scraper import run_scrape_cycle, start_listener, stop_listener, restart_listener_sync, start_channel_scrape_task, cancel_channel_scrape_task, active_scrapes
 from app.mcp_server import mcp_app
 
 logging.basicConfig(level=logging.INFO)
@@ -335,6 +335,29 @@ def delete_channel(channel_id: int, db: Session = Depends(get_db), current_user:
 
     restart_listener_sync()
     return {"success": True, "message": "Channel and associated data deleted"}
+
+@app.post("/api/channels/{channel_id}/scrape")
+def trigger_channel_scrape(channel_id: int, scrape_req: ScrapeRequest, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    channel = db.query(TargetChannel).filter_by(id=channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    try:
+        start_channel_scrape_task(channel_id, scrape_req.start_date, scrape_req.end_date)
+        return {"success": True, "message": f"Scrape started for channel {channel.channel_name}"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/channels/{channel_id}/cancel_scrape")
+def cancel_channel_scrape(channel_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_admin_user)):
+    if cancel_channel_scrape_task(channel_id):
+        return {"success": True, "message": "Scrape task cancelled."}
+    else:
+        raise HTTPException(status_code=400, detail="No active scrape task found for this channel.")
+
+@app.get("/api/channels/{channel_id}/scrape_status")
+def get_channel_scrape_status(channel_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {"is_scraping": channel_id in active_scrapes}
 
 # --- JOBS ENDPOINTS ---
 
